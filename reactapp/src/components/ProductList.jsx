@@ -1,10 +1,22 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import { Search, Filter, X, Edit3, Trash2, Save, XCircle, Package, TrendingUp, AlertCircle, CheckCircle } from 'lucide-react';
-import { fetchProducts, deleteProduct, updateProduct } from '../utils/api';
+import { fetchProductsPaged, fetchProductStats, deleteProduct, updateProduct } from '../utils/api';
+
+const PAGE_SIZE = 20;
+const SORT_MAP = {
+  'name-asc': 'name,asc',
+  'name-desc': 'name,desc',
+  'price-asc': 'price,asc',
+  'price-desc': 'price,desc',
+  'stock-asc': 'stockQuantity,asc',
+  'stock-desc': 'stockQuantity,desc',
+};
 
 const ProductList = () => {
-  const [products, setProducts] = useState([]);
-  const [filteredProducts, setFilteredProducts] = useState([]);
+  const [pageProducts, setPageProducts] = useState([]);
+  const [meta, setMeta] = useState({ page: 0, totalPages: 0, totalElements: 0, first: true, last: true });
+  const [stats, setStats] = useState({ totalProducts: 0, inStock: 0, outOfStock: 0, lowStock: 0, totalValue: 0 });
+  const [page, setPage] = useState(0);
   const [editingId, setEditingId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [alert, setAlert] = useState({ show: false, message: '', type: '' });
@@ -23,80 +35,76 @@ const ProductList = () => {
   const [sortBy, setSortBy] = useState('name-asc');
   const [showFilters, setShowFilters] = useState(false);
 
-  useEffect(() => {
-    loadProducts();
-  }, []);
-
-  useEffect(() => {
-    applyFiltersAndSorting();
-  }, [products, searchTerm, categoryFilter, sortBy]);
-
-  const loadProducts = async () => {
+  // Filters, sorting and paging are applied by the server (Phase 13B completion).
+  const loadProducts = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await fetchProducts();
-      setProducts(res.data);
-      setFilteredProducts(res.data);
+      const res = await fetchProductsPaged({
+        page,
+        size: PAGE_SIZE,
+        sort: SORT_MAP[sortBy] || 'name,asc',
+        search: searchTerm.trim() || undefined,
+        category: categoryFilter.trim() || undefined,
+      });
+      const data = res.data || {};
+      const content = Array.isArray(data.content) ? data.content : [];
+      // Deleting the last row of the final page leaves an empty page: step back.
+      if (content.length === 0 && page > 0 && (data.totalElements ?? 0) > 0) {
+        setPage((p) => Math.max(0, p - 1));
+        return;
+      }
+      setPageProducts(content);
+      setMeta({
+        page: data.page ?? page,
+        totalPages: data.totalPages ?? 0,
+        totalElements: data.totalElements ?? 0,
+        first: data.first ?? true,
+        last: data.last ?? true,
+      });
     } catch (error) {
       console.error('Error loading products:', error);
       showMessage('❌ Failed to load products', 'error');
+      setPageProducts([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, [page, sortBy, searchTerm, categoryFilter]);
 
-  // Exact same filtering logic as CreateOrder
-  const applyFiltersAndSorting = () => {
-    let result = [...products];
-
-    // Apply search filter
-    if (searchTerm) {
-      result = result.filter(p => 
-        p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        p.description.toLowerCase().includes(searchTerm.toLowerCase())
-      );
+  const loadStats = useCallback(async () => {
+    try {
+      const res = await fetchProductStats();
+      const data = res.data || {};
+      setStats({
+        totalProducts: data.totalProducts ?? 0,
+        inStock: data.inStock ?? 0,
+        outOfStock: data.outOfStock ?? 0,
+        lowStock: data.lowStock ?? 0,
+        totalValue: data.totalValue ?? 0,
+      });
+    } catch (error) {
+      console.error('Error loading product stats:', error);
     }
+  }, []);
 
-    // Apply category filter
-    if (categoryFilter) {
-      result = result.filter(p => 
-        p.category.toLowerCase().startsWith(categoryFilter.toLowerCase())
-      );
-    }
+  // Debounce typing; page 1 changes and sort changes reload straight away.
+  useEffect(() => {
+    const timer = setTimeout(loadProducts, 300);
+    return () => clearTimeout(timer);
+  }, [loadProducts]);
 
-    // Apply sorting
-    if (sortBy === 'name-asc') {
-      result.sort((a, b) => a.name.localeCompare(b.name));
-    } else if (sortBy === 'name-desc') {
-      result.sort((a, b) => b.name.localeCompare(a.name));
-    } else if (sortBy === 'price-asc') {
-      result.sort((a, b) => a.price - b.price);
-    } else if (sortBy === 'price-desc') {
-      result.sort((a, b) => b.price - a.price);
-    } else if (sortBy === 'stock-asc') {
-      result.sort((a, b) => a.stockQuantity - b.stockQuantity);
-    } else if (sortBy === 'stock-desc') {
-      result.sort((a, b) => b.stockQuantity - a.stockQuantity);
-    }
+  // Any filter change restarts at the first page.
+  useEffect(() => {
+    setPage(0);
+  }, [searchTerm, categoryFilter, sortBy]);
 
-    setFilteredProducts(result);
-  };
+  useEffect(() => {
+    loadStats();
+  }, [loadStats]);
 
-  // Get unique categories for filter suggestions
+  // Category suggestions come from the loaded page only (the catalogue is paged).
   const categories = useMemo(() => {
-    return [...new Set(products.map(p => p.category))];
-  }, [products]);
-
-  // Statistics
-  const stats = useMemo(() => {
-    const totalProducts = products.length;
-    const inStock = products.filter(p => p.stockQuantity > 0).length;
-    const outOfStock = products.filter(p => p.stockQuantity === 0).length;
-    const lowStock = products.filter(p => p.stockQuantity > 0 && p.stockQuantity <= 10).length;
-    const totalValue = products.reduce((sum, p) => sum + (p.price * p.stockQuantity), 0);
-
-    return { totalProducts, inStock, outOfStock, lowStock, totalValue };
-  }, [products]);
+    return [...new Set(pageProducts.map(p => p.category))];
+  }, [pageProducts]);
 
   const showMessage = (text, type) => {
     setAlert({ show: true, message: text, type });
@@ -121,12 +129,12 @@ const ProductList = () => {
   };
 
   const handleDelete = async (id) => {
-    const product = products.find(p => p.id === id);
+    const product = pageProducts.find(p => p.id === id);
     if (window.confirm(`Are you sure you want to delete "${product?.name}"?`)) {
       try {
         await deleteProduct(id);
         showMessage(`✅ ${product?.name} deleted successfully`, 'success');
-        await loadProducts();
+        await Promise.all([loadProducts(), loadStats()]);
       } catch (error) {
         console.error('Error deleting product:', error);
         showMessage('❌ Failed to delete product', 'error');
@@ -182,10 +190,10 @@ const ProductList = () => {
       };
       
       await updateProduct(editingId, updatedData);
-      const product = products.find(p => p.id === editingId);
+      const product = pageProducts.find(p => p.id === editingId);
       showMessage(`✅ ${product?.name} updated successfully`, 'success');
       setEditingId(null);
-      await loadProducts();
+      await Promise.all([loadProducts(), loadStats()]);
     } catch (error) {
       console.error('Error updating product:', error);
       showMessage('❌ Failed to update product', 'error');
@@ -295,7 +303,7 @@ const ProductList = () => {
           </button>
           
           <div className="text-sm text-gray-600">
-            Showing {filteredProducts.length} of {products.length} products
+            Showing {meta.totalElements === 0 ? 0 : meta.page * PAGE_SIZE + 1}–{meta.page * PAGE_SIZE + pageProducts.length} of {meta.totalElements} products
           </div>
         </div>
         
@@ -374,10 +382,10 @@ const ProductList = () => {
       {/* Products Table */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
         <div className="px-6 py-4 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">Products ({filteredProducts.length})</h2>
+          <h2 className="text-lg font-semibold text-gray-900">Products ({meta.totalElements})</h2>
         </div>
 
-        {filteredProducts.length === 0 ? (
+        {pageProducts.length === 0 ? (
           <div className="text-center py-16">
             <Package className="mx-auto text-gray-400 mb-4" size={48} />
             <h3 className="text-lg font-medium text-gray-900 mb-2">No products found</h3>
@@ -411,7 +419,7 @@ const ProductList = () => {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {filteredProducts.map(product => (
+                {pageProducts.map(product => (
                   <tr 
                     key={product.id} 
                     className={`hover:bg-gray-50 transition-colors ${editingId === product.id ? 'bg-blue-50' : ''}`}
@@ -573,6 +581,31 @@ const ProductList = () => {
             </table>
           </div>
         )}
+      </div>
+
+      {/* Server-side pagination controls */}
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+        <p className="text-sm text-gray-600">
+          Page {Math.min(meta.page + 1, Math.max(meta.totalPages, 1))} of {Math.max(meta.totalPages, 1)}
+        </p>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            disabled={meta.first || loading}
+            className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            Previous
+          </button>
+          <button
+            type="button"
+            onClick={() => setPage((p) => p + 1)}
+            disabled={meta.last || loading}
+            className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            Next
+          </button>
+        </div>
       </div>
 
       {/* Hidden datalist for edit mode categories */}

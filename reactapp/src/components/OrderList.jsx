@@ -1,6 +1,6 @@
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { fetchOrders, updateOrderStatus, deleteOrder } from "../utils/api";
+import { fetchOrdersPaged, fetchOrderStats, exportOrdersCsv, updateOrderStatus, deleteOrder } from "../utils/api";
 import {
   Package,
   Truck,
@@ -32,6 +32,9 @@ const OrderList = ({ onViewOrder }) => {
   const [error, setError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
+  // Phase 10C: the search runs on the server, so the term is debounced to
+  // avoid firing one request per keystroke.
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [dateFilter, setDateFilter] = useState("ALL");
   const [amountFilter, setAmountFilter] = useState("ALL");
@@ -39,6 +42,13 @@ const OrderList = ({ onViewOrder }) => {
   const [sortBy, setSortBy] = useState("orderDate");
   const [sortOrder, setSortOrder] = useState("desc");
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+  // Phase 10C: server-side pagination state.
+  const [totalPages, setTotalPages] = useState(0);
+  const [totalElements, setTotalElements] = useState(0);
+  const [stats, setStats] = useState({
+    total: 0, pending: 0, shipped: 0, delivered: 0,
+    totalRevenue: 0, averageOrderValue: 0,
+  });
 
   const ordersPerPage = 8;
   const navigate = useNavigate();
@@ -50,40 +60,141 @@ const OrderList = ({ onViewOrder }) => {
     return resp;
   }, []);
 
+  /**
+   * Maps the server-side order DTO onto the shape this component renders.
+   * The DTO carries flattened items (productName) instead of the nested
+   * product entity, so the item list is rebuilt here.
+   */
   const normalizeOrders = useCallback(
     (raw) =>
       Array.isArray(raw)
         ? raw.map((o) => ({
             ...o,
             id: o.id || o._id || o.orderId,
-            orderItems: Array.isArray(o.orderItems) ? o.orderItems : [],
             totalAmount: parseFloat(o.totalAmount) || 0,
             orderDate: o.orderDate || new Date().toISOString(),
+            orderItems: Array.isArray(o.items)
+              ? o.items.map((item, index) => ({
+                  ...item,
+                  id: item.id ?? index,
+                  quantity: item.quantity || 0,
+                  priceAtPurchase: parseFloat(item.priceAtPurchase) || 0,
+                  product: { name: item.productName || "Product" },
+                }))
+              : [],
           }))
         : [],
     []
   );
 
+  /**
+   * Builds the query parameters for the paged endpoint from the current
+   * filter/sort state. The date and amount filters are translated into the
+   * range parameters the backend understands.
+   */
+  const buildQueryParams = useCallback(() => {
+    const params = {
+      page: currentPage - 1, // the API is 0-based, the UI is 1-based
+      size: ordersPerPage,
+      sort: `${sortBy},${sortOrder}`,
+    };
+
+    if (statusFilter !== "ALL") params.status = statusFilter;
+    if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
+
+    // Date filter -> [dateFrom, dateTo] range.
+    if (dateFilter !== "ALL") {
+      const now = new Date();
+      let from = null;
+      if (dateFilter === "TODAY") {
+        from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      } else if (dateFilter === "WEEK") {
+        from = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      } else if (dateFilter === "MONTH") {
+        from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      }
+      if (from) {
+        params.dateFrom = from.toISOString().slice(0, 10);
+        params.dateTo = now.toISOString().slice(0, 10);
+      }
+    }
+
+    // Amount filter -> [minAmount, maxAmount] range (same thresholds as before).
+    if (amountFilter === "LOW") {
+      params.maxAmount = 500;
+    } else if (amountFilter === "MEDIUM") {
+      params.minAmount = 500;
+      params.maxAmount = 1500;
+    } else if (amountFilter === "HIGH") {
+      params.minAmount = 1500;
+    }
+
+    return params;
+  }, [currentPage, sortBy, sortOrder, statusFilter, debouncedSearch, dateFilter, amountFilter]);
+
   const loadOrders = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const res = await fetchOrders();
+      const res = await fetchOrdersPaged(buildQueryParams());
       const data = extractData(res);
-      const normalizedData = normalizeOrders(data);
+      const normalizedData = normalizeOrders(data?.content ?? []);
       setOrders(normalizedData);
+      setTotalPages(data?.totalPages ?? 0);
+      setTotalElements(data?.totalElements ?? 0);
     } catch (err) {
       console.error("Error fetching orders:", err);
       setError("Failed to load orders. Please check your connection and try again.");
       setOrders([]);
+      setTotalPages(0);
+      setTotalElements(0);
     } finally {
       setLoading(false);
     }
-  }, [extractData, normalizeOrders]);
+  }, [extractData, normalizeOrders, buildQueryParams]);
+
+  /**
+   * The KPI cards must show the numbers of the WHOLE data set, not of the
+   * current page, so they come from the dedicated stats endpoint.
+   */
+  const loadStats = useCallback(async () => {
+    try {
+      const res = await fetchOrderStats();
+      const data = extractData(res);
+      setStats({
+        total: data?.total ?? 0,
+        pending: data?.pending ?? 0,
+        shipped: data?.shipped ?? 0,
+        delivered: data?.delivered ?? 0,
+        cancelled: data?.cancelled ?? 0,
+        totalRevenue: data?.totalRevenue ?? 0,
+        averageOrderValue: data?.averageOrderValue ?? 0,
+      });
+    } catch (err) {
+      console.error("Error fetching order stats:", err);
+    }
+  }, [extractData]);
 
   useEffect(() => {
     loadOrders();
   }, [loadOrders]);
+
+  useEffect(() => {
+    loadStats();
+  }, [loadStats]);
+
+  // Debounce the search term — the server does the filtering, so a request
+  // per keystroke would be wasteful.
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(searchTerm), 350);
+    return () => clearTimeout(timer);
+  }, [searchTerm]);
+
+  // Changing a filter or the sort order invalidates the current page —
+  // jump back to the first page so the user never lands on an empty one.
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedSearch, statusFilter, dateFilter, amountFilter, sortBy, sortOrder]);
 
   useEffect(() => {
     if (successMessage) {
@@ -142,127 +253,31 @@ const OrderList = ({ onViewOrder }) => {
     navigate(`/admin/orders/${id}`);
   };
 
-  const filteredAndSortedOrders = useMemo(() => {
-    let filtered = orders.filter((order) => {
-      const searchLower = searchTerm.toLowerCase();
-      const matchesSearch =
-        searchTerm === "" ||
-        order.customerName?.toLowerCase().includes(searchLower) ||
-        order.customerEmail?.toLowerCase().includes(searchLower) ||
-        order.id?.toString().toLowerCase().includes(searchLower) ||
-        order.shippingAddress?.toLowerCase().includes(searchLower) ||
-        order.trackingNumber?.toLowerCase().includes(searchLower);
 
-      const matchesStatus = statusFilter === "ALL" || order.status === statusFilter;
+  const handleExportOrders = useCallback(async () => {
+    try {
+      // Phase 10C: the export is produced by the server for ALL orders
+      // matching the current filters (not only the rows of this page).
+      const params = buildQueryParams();
+      delete params.page;
+      delete params.size;
 
-      const orderDate = new Date(order.orderDate);
-      const now = new Date();
-      let matchesDate = true;
-      if (dateFilter === "TODAY") {
-        matchesDate = orderDate.toDateString() === now.toDateString();
-      } else if (dateFilter === "WEEK") {
-        const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-        matchesDate = orderDate >= weekAgo;
-      } else if (dateFilter === "MONTH") {
-        const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-        matchesDate = orderDate >= monthAgo;
-      }
-
-      let matchesAmount = true;
-      const amount = order.totalAmount;
-      if (amountFilter === "LOW") {
-        matchesAmount = amount < 500;
-      } else if (amountFilter === "MEDIUM") {
-        matchesAmount = amount >= 500 && amount < 1500;
-      } else if (amountFilter === "HIGH") {
-        matchesAmount = amount >= 1500;
-      }
-
-      return matchesSearch && matchesStatus && matchesDate && matchesAmount;
-    });
-
-    filtered.sort((a, b) => {
-      let aValue = a[sortBy];
-      let bValue = b[sortBy];
-
-      if (sortBy === "orderDate") {
-        aValue = new Date(aValue);
-        bValue = new Date(bValue);
-      } else if (sortBy === "totalAmount") {
-        aValue = parseFloat(aValue) || 0;
-        bValue = parseFloat(bValue) || 0;
-      } else if (typeof aValue === "string") {
-        aValue = aValue.toLowerCase();
-        bValue = bValue.toLowerCase();
-      }
-
-      return sortOrder === "asc"
-        ? aValue < bValue
-          ? -1
-          : aValue > bValue
-          ? 1
-          : 0
-        : aValue > bValue
-        ? -1
-        : aValue < bValue
-        ? 1
-        : 0;
-    });
-
-    return filtered;
-  }, [orders, searchTerm, statusFilter, dateFilter, amountFilter, sortBy, sortOrder]);
-
-  const totalPages = Math.ceil(filteredAndSortedOrders.length / ordersPerPage);
-  const paginatedOrders = filteredAndSortedOrders.slice(
-    (currentPage - 1) * ordersPerPage,
-    currentPage * ordersPerPage
-  );
-
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [searchTerm, statusFilter, dateFilter, amountFilter]);
-
-  const stats = useMemo(() => {
-    const total = orders.length;
-    const pending = orders.filter((o) => o.status === "PENDING").length;
-    const shipped = orders.filter((o) => o.status === "SHIPPED").length;
-    const delivered = orders.filter((o) => o.status === "DELIVERED").length;
-    const cancelled = orders.filter((o) => o.status === "CANCELLED").length;
-    const totalRevenue = orders.reduce((sum, order) => sum + order.totalAmount, 0);
-    const averageOrderValue = total > 0 ? totalRevenue / total : 0;
-
-    return { total, pending, shipped, delivered, cancelled, totalRevenue, averageOrderValue };
-  }, [orders]);
-
-  const handleExportOrders = useCallback(() => {
-    const csvContent = [
-      "Order ID,Customer Name,Email,Phone,Status,Total Amount,Order Date,Shipping Address,Items Count",
-      ...filteredAndSortedOrders.map((order) =>
-        [
-          order.id,
-          `"${order.customerName || ""}"`,
-          order.customerEmail || "",
-          order.customerPhone || "",
-          order.status,
-          order.totalAmount,
-          new Date(order.orderDate).toLocaleDateString(),
-          `"${order.shippingAddress || ""}"`,
-          order.orderItems?.length || 0,
-        ].join(",")
-      ),
-    ].join("\n");
-
-    const blob = new Blob([csvContent], { type: "text/csv" });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `orders-export-${new Date().toISOString().split("T")[0]}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    window.URL.revokeObjectURL(url);
-    setSuccessMessage("Orders exported to CSV successfully");
-  }, [filteredAndSortedOrders]);
+      const res = await exportOrdersCsv(params);
+      const blob = new Blob([res.data], { type: "text/csv" });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `orders-export-${new Date().toISOString().split("T")[0]}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      setSuccessMessage("Orders exported to CSV successfully");
+    } catch (err) {
+      console.error("Error exporting orders:", err);
+      setError("Failed to export orders. Please try again.");
+    }
+  }, [buildQueryParams]);
 
   const getStatusBadge = (status) => {
     const baseClasses = "px-2 py-1 rounded-md text-xs font-medium uppercase tracking-wider";
@@ -336,7 +351,7 @@ const OrderList = ({ onViewOrder }) => {
               </button>
               <button
                 onClick={handleExportOrders}
-                disabled={filteredAndSortedOrders.length === 0}
+                disabled={orders.length === 0}
                 className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
               >
                 <Download className="w-4 h-4" />
@@ -527,30 +542,30 @@ const OrderList = ({ onViewOrder }) => {
         </div>
 
         {/* Orders Count */}
-        {filteredAndSortedOrders.length > 0 && (
+        {orders.length > 0 && (
           <div className="mb-4 text-sm text-gray-600">
             Showing {(currentPage - 1) * ordersPerPage + 1} to{" "}
-            {Math.min(currentPage * ordersPerPage, filteredAndSortedOrders.length)} of{" "}
-            {filteredAndSortedOrders.length} orders
-            {filteredAndSortedOrders.length !== orders.length && (
-              <span className="text-blue-600"> (filtered from {orders.length} total)</span>
+            {Math.min(currentPage * ordersPerPage, totalElements)} of{" "}
+            {totalElements} orders
+            {totalElements !== stats.total && (
+              <span className="text-blue-600"> (filtered from {stats.total} total)</span>
             )}
           </div>
         )}
 
         {/* Orders Grid */}
-        {filteredAndSortedOrders.length === 0 ? (
+        {orders.length === 0 ? (
           <div className="bg-white rounded-lg border border-gray-200 p-12 text-center">
             <Package className="w-16 h-16 text-gray-400 mx-auto mb-4" />
             <h3 className="text-xl font-medium text-gray-900 mb-2">
-              {orders.length === 0 ? "No orders yet" : "No orders match your filters"}
+              {stats.total === 0 ? "No orders yet" : "No orders match your filters"}
             </h3>
             <p className="text-gray-600 mb-4">
-              {orders.length === 0
+              {stats.total === 0
                 ? "When you receive orders, they will appear here."
                 : "Try adjusting your search criteria or clearing filters."}
             </p>
-            {orders.length > 0 && (
+            {stats.total > 0 && (
               <button
                 onClick={() => {
                   setSearchTerm("");
@@ -566,7 +581,7 @@ const OrderList = ({ onViewOrder }) => {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {paginatedOrders.map((order) => (
+            {orders.map((order) => (
               <div
                 key={order.id}
                 className="bg-white rounded-lg border border-gray-200 hover:shadow-md transition-shadow"

@@ -1,6 +1,6 @@
 // components/Profile.jsx
 import React, { useEffect, useState } from "react";
-import { getUserById } from "../utils/api";
+import { getCurrentUser } from "../utils/api";
 import { useNavigate } from "react-router-dom";
 
 export default function Profile() {
@@ -11,17 +11,11 @@ export default function Profile() {
 
   useEffect(() => {
     const fetchUser = async () => {
-      const userId = localStorage.getItem("userId");
-      if (!userId) {
-        setError("User not logged in");
-        setLoading(false);
-        return;
-      }
-
       try {
-        const response = await getUserById(userId);
+        // /auth/me resolves the user from the JWT — works for both ADMIN and USER.
+        const response = await getCurrentUser();
         setUser(response.data);
-      } catch (err) {
+      } catch {
         setError("Failed to fetch user details");
       } finally {
         setLoading(false);
@@ -32,15 +26,13 @@ export default function Profile() {
   }, []);
 
   const handleLogout = () => {
-    // Clear all localStorage items
-    localStorage.removeItem("userId");
     localStorage.removeItem("token");
-    localStorage.removeItem("userRole");
+    localStorage.removeItem("role");
+    localStorage.removeItem("userId");
     localStorage.removeItem("userName");
     localStorage.removeItem("userEmail");
-    
-    // Redirect to home page
-    navigate("/");
+
+    navigate("/login");
   };
 
   if (loading) {

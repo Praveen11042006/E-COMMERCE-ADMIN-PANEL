@@ -1,5 +1,6 @@
 package com.examly.springapp.model;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import java.time.LocalDateTime;
 
@@ -14,7 +15,13 @@ public class User {
     @Column(nullable = false, unique = true)
     private String email;
 
+    /**
+     * BCrypt password hash.
+     * WRITE_ONLY ensures the hash is accepted on input (registration/update)
+     * but is NEVER serialized back to clients (prevents credential exposure).
+     */
     @Column(nullable = false)
+    @JsonProperty(access = JsonProperty.Access.WRITE_ONLY)
     private String password;
 
     private String name;

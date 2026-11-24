@@ -32,7 +32,7 @@ const ProductForm = ({ onSave, onCancel }) => {
       const response = await createProduct(formatted);
       if (onSave) onSave(response);
       navigate('/admin/products');
-    } catch (err) {
+    } catch {
       setError('Invalid product data. Please check your inputs.');
     }
   };

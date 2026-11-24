@@ -1,5 +1,5 @@
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, AreaChart, Area
@@ -8,13 +8,12 @@ import {
   DollarSign, Package, ShoppingCart, Users, RefreshCw, AlertCircle,
   Calendar, TrendingUp, Activity, GitBranch
 } from 'lucide-react';
-import { fetchProducts, fetchOrders } from '../utils/api';
+import { fetchCategorySales, fetchInventory, fetchOrderMetrics, fetchTimeSeries } from '../utils/api';
 
 const CHART_COLORS = ['#2563eb', '#16a34a', '#dc2626', '#ca8a04', '#9333ea', '#0891b2', '#ec4899', '#f59e0b'];
 
 // Helper function to calculate days between dates
 const getDaysBetweenDates = (dateFilter) => {
-  const now = new Date();
   switch (dateFilter) {
     case 'today': return 1;
     case 'week': return 7;
@@ -31,13 +30,13 @@ const getActivityColor = (level) => {
   return colors[Math.min(level, 4)] || colors[0];
 };
 
-// Helper function to filter orders by date range with UTC normalization
-const filterOrdersByDate = (orders, dateFilter, customDateRange) => {
-  if (dateFilter === 'all') return orders;
-  
+// Date window of the active dashboard filter (null = no window / whole history).
+const getFilterDateRange = (dateFilter, customDateRange) => {
+  if (dateFilter === 'all') return null;
+
   const now = new Date();
   let startDate, endDate;
-  
+
   switch (dateFilter) {
     case 'today':
       startDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -64,30 +63,23 @@ const filterOrdersByDate = (orders, dateFilter, customDateRange) => {
         startDate = new Date(customDateRange.start);
         endDate = new Date(customDateRange.end);
       } else {
-        return orders;
+        return null;
       }
       break;
     default:
-      return orders;
+      return null;
   }
-  
-  return orders.filter(order => {
-    const orderDate = new Date(order.orderDate || order.created_at || order.date || order.createdAt);
-    const utcOrderDate = new Date(Date.UTC(
-      orderDate.getUTCFullYear(),
-      orderDate.getUTCMonth(),
-      orderDate.getUTCDate(),
-      orderDate.getUTCHours(),
-      orderDate.getUTCMinutes()
-    ));
-    return utcOrderDate >= startDate && utcOrderDate <= endDate;
-  });
+
+  return { startDate, endDate };
 };
 
 export default function EnhancedAnalyticsDashboard() {
-  const [products, setProducts] = useState([]);
-  const [orders, setOrders] = useState([]);
-  const [filteredOrders, setFilteredOrders] = useState([]);
+  // Phase 13D: no product catalogue is downloaded — the inventory widget and the
+  // category chart use pre-aggregated endpoints instead.
+  const [categorySales, setCategorySales] = useState([]);
+  const [inventory, setInventory] = useState({ totalProducts: 0, lowStockProducts: [] });
+  const [metrics, setMetrics] = useState(null);
+  const [timeSeries, setTimeSeries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [dateFilter, setDateFilter] = useState('all');
@@ -96,44 +88,93 @@ export default function EnhancedAnalyticsDashboard() {
     end: ''
   });
 
-  useEffect(() => {
-    loadData();
+  const dashboardRequestRef = useRef(0);
+
+  const loadInventory = useCallback(async () => {
+    try {
+      const res = await fetchInventory();
+      const data = res.data || res || {};
+      setInventory({
+        totalProducts: data.totalProducts || 0,
+        lowStockProducts: Array.isArray(data.lowStockProducts) ? data.lowStockProducts : []
+      });
+    } catch (err) {
+      console.error('Inventory error:', err);
+    }
   }, []);
+
+  // Phase 13E: the dashboard no longer downloads the order table. KPIs, tables and
+  // status counts arrive aggregated; only (date, amount, email) comes back for the
+  // two time-series charts. Stale responses from older filters are discarded.
+  const loadDashboard = useCallback(async () => {
+    const requestId = ++dashboardRequestRef.current;
+    const range = getFilterDateRange(dateFilter, customDateRange);
+    const windowParams = range
+      ? { from: range.startDate.getTime(), to: range.endDate.getTime() }
+      : {};
+    const days = getDaysBetweenDates(dateFilter);
+    try {
+      const [metricsRes, seriesRes] = await Promise.all([
+        fetchOrderMetrics(days > 0 ? { ...windowParams, days } : windowParams),
+        fetchTimeSeries(windowParams)
+      ]);
+      if (requestId !== dashboardRequestRef.current) return;
+      setMetrics(metricsRes.data || null);
+      setTimeSeries(Array.isArray(seriesRes.data) ? seriesRes.data : []);
+      setError(null);
+    } catch (err) {
+      if (requestId !== dashboardRequestRef.current) return;
+      setError('Failed to load data from database');
+      console.error('Database error:', err);
+    } finally {
+      if (requestId === dashboardRequestRef.current) setLoading(false);
+    }
+  }, [dateFilter, customDateRange]);
+
+  const categoryRequestRef = useRef(0);
+  const loadCategorySales = useCallback(async () => {
+    // Ignore a response that arrives after a newer filter request was issued.
+    const requestId = ++categoryRequestRef.current;
+    const range = getFilterDateRange(dateFilter, customDateRange);
+    try {
+      const res = await fetchCategorySales(range
+        ? { from: range.startDate.getTime(), to: range.endDate.getTime() }
+        : {});
+      if (requestId !== categoryRequestRef.current) return;
+      setCategorySales(Array.isArray(res.data) ? res.data : []);
+    } catch (err) {
+      if (requestId !== categoryRequestRef.current) return;
+      console.error('Category sales error:', err);
+      setCategorySales([]);
+    }
+  }, [dateFilter, customDateRange]);
+
+  const refreshAll = useCallback(() => {
+    loadDashboard();
+    loadInventory();
+    loadCategorySales();
+  }, [loadDashboard, loadInventory, loadCategorySales]);
+
+  useEffect(() => {
+    loadDashboard();
+  }, [loadDashboard]);
+
+  useEffect(() => {
+    loadInventory();
+  }, [loadInventory]);
+
+  useEffect(() => {
+    loadCategorySales();
+  }, [loadCategorySales]);
 
   // Real-time polling for 'today' filter
   useEffect(() => {
     if (dateFilter === 'today') {
-      const interval = setInterval(loadData, 30000); // Refresh every 30 seconds
+      const interval = setInterval(refreshAll, 30000); // Refresh every 30 seconds
       return () => clearInterval(interval);
     }
-  }, [dateFilter]);
-
-  useEffect(() => {
-    const filtered = filterOrdersByDate(orders, dateFilter, customDateRange);
-    setFilteredOrders(filtered);
-  }, [orders, dateFilter, customDateRange]);
-
-  const loadData = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [productsResponse, ordersResponse] = await Promise.all([
-        fetchProducts(),
-        fetchOrders()
-      ]);
-
-      const productsData = productsResponse.data || productsResponse || [];
-      const ordersData = ordersResponse.data || ordersResponse || [];
-
-      setProducts(productsData);
-      setOrders(ordersData);
-    } catch (err) {
-      setError('Failed to load data from database');
-      console.error('Database error:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+    return undefined;
+  }, [dateFilter, refreshAll]);
 
   // Activity heatmap data
   const activityData = useMemo(() => {
@@ -154,7 +195,7 @@ export default function EnhancedAnalyticsDashboard() {
       });
     }
     
-    filteredOrders.forEach(order => {
+    timeSeries.forEach(order => {
       const orderDate = new Date(order.orderDate || order.created_at || order.date || order.createdAt);
       const dateKey = orderDate.toISOString().split('T')[0];
       
@@ -195,11 +236,11 @@ export default function EnhancedAnalyticsDashboard() {
     });
     
     return Array.from(activityMap.values()).sort((a, b) => new Date(a.date) - new Date(b.date));
-  }, [filteredOrders]);
+  }, [timeSeries]);
 
   // Revenue trend data based on date filter
   const revenueData = useMemo(() => {
-    if (!filteredOrders || filteredOrders.length === 0) return [];
+    if (!timeSeries || timeSeries.length === 0) return [];
     
     const now = new Date();
     let startDate, endDate, isHourly = false;
@@ -236,7 +277,7 @@ export default function EnhancedAnalyticsDashboard() {
         }
         break;
       case 'all':
-        startDate = new Date(Math.min(...filteredOrders.map(o => 
+        startDate = new Date(Math.min(...timeSeries.map(o => 
           new Date(o.orderDate || o.created_at || o.date || o.createdAt).getTime())));
         endDate = new Date();
         break;
@@ -250,7 +291,6 @@ export default function EnhancedAnalyticsDashboard() {
     if (isHourly) {
       // Hourly data for 'today'
       for (let h = 0; h < 24; h++) {
-        const hourStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h));
         const hourKey = `${h}:00`;
         dataMap.set(hourKey, {
           time: hourKey,
@@ -259,7 +299,7 @@ export default function EnhancedAnalyticsDashboard() {
         });
       }
       
-      filteredOrders.forEach(order => {
+      timeSeries.forEach(order => {
         const orderDate = new Date(order.orderDate || order.created_at || order.date || order.createdAt);
         const hour = orderDate.getUTCHours();
         const hourKey = `${hour}:00`;
@@ -284,7 +324,7 @@ export default function EnhancedAnalyticsDashboard() {
         });
       }
       
-      filteredOrders.forEach(order => {
+      timeSeries.forEach(order => {
         const orderDate = new Date(order.orderDate || order.created_at || order.date || order.createdAt);
         const dateKey = orderDate.toISOString().split('T')[0];
         
@@ -298,179 +338,51 @@ export default function EnhancedAnalyticsDashboard() {
       return Array.from(dataMap.values())
         .sort((a, b) => new Date(a.date) - new Date(b.date));
     }
-  }, [filteredOrders, dateFilter, customDateRange]);
+  }, [timeSeries, dateFilter, customDateRange]);
 
-  // Calculate comprehensive analytics
+  // Phase 13E: every number below is pre-aggregated by the database.
   const stats = useMemo(() => {
-    if (!filteredOrders || filteredOrders.length === 0) {
+    const m = metrics || {};
+    const totalRevenue = m.revenue || 0;
+    const totalOrders = m.orders || 0;
+    const totalCustomers = m.customers || 0;
+    const avgOrderValue = m.averageOrderValue || 0;
+    const growthRate = m.growthRate || 0;
+
+    const topProducts = (m.topProducts || []).map((product) => ({ ...product }));
+    const topCustomers = (m.topCustomers || []).map((customer) => ({ ...customer }));
+
+    const statusData = (m.statusDistribution || []).map((row, index) => {
+      const status = row.status || 'Unknown';
       return {
-        totalRevenue: 0,
-        totalOrders: 0,
-        totalProducts: products.length,
-        totalCustomers: 0,
-        avgOrderValue: 0,
-        growthRate: 0,
-        topProducts: [],
-        topCustomers: [],
-        categoryData: [],
-        statusData: [],
-        recentOrders: [],
-        lowStockProducts: products.filter(p => (p.stockQuantity || p.stock || p.quantity) < 10).slice(0, 5),
-        peakDay: null,
-        totalActivity: 0,
-        conversionMetrics: {
-          repeatCustomers: 0,
-          avgOrdersPerCustomer: 0,
-          customerLifetimeValue: 0
-        }
+        name: status.charAt(0).toUpperCase() + status.slice(1).toLowerCase(),
+        value: row.count || 0,
+        fill: CHART_COLORS[index % CHART_COLORS.length]
       };
-    }
-
-    const totalRevenue = filteredOrders.reduce((sum, order) => {
-      return sum + (order.totalAmount || order.total || order.amount || 0);
-    }, 0);
-    
-    const totalOrders = filteredOrders.length;
-    const totalProducts = products.length;
-    
-    const uniqueCustomers = new Set(filteredOrders.map(o => 
-      o.customerEmail || o.customer_email || o.email || o.customer_id
-    ).filter(Boolean));
-    const totalCustomers = uniqueCustomers.size;
-    const avgOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
-
-    const currentPeriodDays = getDaysBetweenDates(dateFilter);
-    let growthRate = 0;
-    
-    if (dateFilter !== 'all' && currentPeriodDays > 0) {
-      const previousPeriodStart = new Date();
-      previousPeriodStart.setDate(previousPeriodStart.getDate() - (currentPeriodDays * 2));
-      const previousPeriodEnd = new Date();
-      previousPeriodEnd.setDate(previousPeriodEnd.getDate() - currentPeriodDays);
-      
-      const previousOrders = orders.filter(order => {
-        const orderDate = new Date(order.orderDate || order.created_at || order.date || order.createdAt);
-        return orderDate >= previousPeriodStart && orderDate <= previousPeriodEnd;
-      });
-      
-      const previousRevenue = previousOrders.reduce((sum, order) => 
-        sum + (order.totalAmount || order.total || order.amount || 0), 0);
-      growthRate = previousRevenue > 0 ? ((totalRevenue - previousRevenue) / previousRevenue) * 100 : 0;
-    }
-
-    const customerMap = new Map();
-    filteredOrders.forEach(order => {
-      const customerKey = order.customerEmail || order.customer_email || order.email || order.customer_id;
-      if (!customerKey) return;
-      
-      if (!customerMap.has(customerKey)) {
-        customerMap.set(customerKey, {
-          name: order.customerName || order.customer_name || order.name || 'Unknown',
-          email: customerKey,
-          totalSpent: 0,
-          totalOrders: 0,
-          firstOrder: order.orderDate || order.created_at || order.date || order.createdAt,
-          lastOrder: order.orderDate || order.created_at || order.date || order.createdAt
-        });
-      }
-      const customer = customerMap.get(customerKey);
-      customer.totalSpent += order.totalAmount || order.total || order.amount || 0;
-      customer.totalOrders += 1;
-      customer.lastOrder = order.orderDate || order.created_at || order.date || order.createdAt;
     });
 
-    const topCustomers = Array.from(customerMap.values())
-      .sort((a, b) => b.totalSpent - a.totalSpent)
-      .slice(0, 8);
+    const recentOrders = (m.recentOrders || []).map((order) => ({
+      ...order,
+      formattedDate: order.orderDate ? new Date(order.orderDate).toLocaleDateString() : '—',
+      itemCount: order.itemCount || 0
+    }));
 
-    const productSales = new Map();
-    filteredOrders.forEach(order => {
-      const items = order.orderItems || order.items || order.products || [];
-      items.forEach(item => {
-        const product = item.product || item;
-        if (product) {
-          const productId = product.id || product.product_id;
-          if (!productSales.has(productId)) {
-            productSales.set(productId, {
-              id: productId,
-              name: product.name || product.title || 'Unknown Product',
-              category: product.category || 'Uncategorized',
-              price: product.price || 0,
-              quantity: 0,
-              revenue: 0,
-              orders: 0
-            });
-          }
-          const productData = productSales.get(productId);
-          const quantity = item.quantity || 1;
-          const price = item.priceAtPurchase || item.price || product.price || 0;
-          
-          productData.quantity += quantity;
-          productData.revenue += price * quantity;
-          productData.orders += 1;
-        }
-      });
-    });
-
-    const topProducts = Array.from(productSales.values())
-      .sort((a, b) => b.revenue - a.revenue)
-      .slice(0, 8);
-
-    const categoryMap = new Map();
-    productSales.forEach(product => {
-      const cat = product.category || 'Uncategorized';
-      if (!categoryMap.has(cat)) {
-        categoryMap.set(cat, 0);
-      }
-      categoryMap.set(cat, categoryMap.get(cat) + product.revenue);
-    });
-
-    const categoryData = Array.from(categoryMap.entries())
-      .map(([name, value], index) => ({
-        name,
-        value,
-        fill: CHART_COLORS[index % CHART_COLORS.length]
-      }))
-      .sort((a, b) => b.value - a.value);
-
-    const statusMap = new Map();
-    filteredOrders.forEach(order => {
-      const status = order.status || order.order_status || 'Unknown';
-      statusMap.set(status, (statusMap.get(status) || 0) + 1);
-    });
-
-    const statusData = Array.from(statusMap.entries())
-      .map(([name, value], index) => ({
-        name: name.charAt(0).toUpperCase() + name.slice(1).toLowerCase(),
-        value,
+    // Category revenue is already aggregated; the chart only sorts and colours.
+    const categoryData = [...categorySales]
+      .sort((a, b) => (Number(b.revenue) || 0) - (Number(a.revenue) || 0))
+      .map((row, index) => ({
+        name: row.category || 'Uncategorized',
+        value: Number(row.revenue) || 0,
         fill: CHART_COLORS[index % CHART_COLORS.length]
       }));
 
-    const recentOrders = filteredOrders
-      .sort((a, b) => new Date(b.orderDate || b.created_at || b.date || b.createdAt) - new Date(a.orderDate || a.created_at || a.date || a.createdAt))
-      .slice(0, 5)
-      .map(order => ({
-        ...order,
-        formattedDate: new Date(order.orderDate || order.created_at || order.date || order.createdAt).toLocaleDateString(),
-        itemCount: (order.orderItems || order.items || order.products || []).length
-      }));
-
-    const lowStockProducts = products
-      .filter(p => (p.stockQuantity || p.stock || p.quantity || 0) < 20)
-      .sort((a, b) => (a.stockQuantity || a.stock || p.quantity || 0) - (b.stockQuantity || b.stock || b.quantity || 0))
-      .slice(0, 5);
-
-    const peakDay = activityData.reduce((peak, day) => 
+    const peakDay = activityData.reduce((peak, day) =>
       day.orders > (peak?.orders || 0) ? day : peak, null);
-
-    const repeatCustomers = Array.from(customerMap.values()).filter(c => c.totalOrders > 1).length;
-    const avgOrdersPerCustomer = totalCustomers > 0 ? totalOrders / totalCustomers : 0;
-    const customerLifetimeValue = totalCustomers > 0 ? totalRevenue / totalCustomers : 0;
 
     return {
       totalRevenue,
       totalOrders,
-      totalProducts,
+      totalProducts: inventory.totalProducts || 0,
       totalCustomers,
       avgOrderValue,
       growthRate,
@@ -479,16 +391,16 @@ export default function EnhancedAnalyticsDashboard() {
       categoryData,
       statusData,
       recentOrders,
-      lowStockProducts,
+      lowStockProducts: inventory.lowStockProducts || [],
       peakDay,
       totalActivity: activityData.reduce((sum, day) => sum + day.orders, 0),
       conversionMetrics: {
-        repeatCustomers,
-        avgOrdersPerCustomer,
-        customerLifetimeValue
+        repeatCustomers: m.repeatCustomers || 0,
+        avgOrdersPerCustomer: m.avgOrdersPerCustomer || 0,
+        customerLifetimeValue: m.customerLifetimeValue || 0
       }
     };
-  }, [products, filteredOrders, activityData, dateFilter, orders]);
+  }, [metrics, categorySales, inventory, activityData]);
 
   if (loading) {
     return (
@@ -510,7 +422,7 @@ export default function EnhancedAnalyticsDashboard() {
           <h2 className="text-xl font-semibold text-gray-800 mb-2">Error Loading Data</h2>
           <p className="text-gray-600 mb-6">{error}</p>
           <button
-            onClick={loadData}
+            onClick={refreshAll}
             className="bg-red-600 text-white px-6 py-3 rounded-lg hover:bg-red-700 flex items-center gap-2 mx-auto transition-colors"
           >
             <RefreshCw className="h-4 w-4" />
@@ -571,7 +483,7 @@ export default function EnhancedAnalyticsDashboard() {
               )}
 
               <button
-                onClick={loadData}
+                onClick={refreshAll}
                 className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white px-6 py-3 rounded-xl hover:from-emerald-600 hover:to-teal-600 flex items-center gap-2 shadow-lg transition-all transform hover:scale-105"
               >
                 <RefreshCw className="h-4 w-4" />
@@ -1058,7 +970,7 @@ export default function EnhancedAnalyticsDashboard() {
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-blue-100">Total Records</span>
-                <span className="font-bold text-xl">{filteredOrders.length}</span>
+                <span className="font-bold text-xl">{timeSeries.length}</span>
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-blue-100">Last Updated</span>

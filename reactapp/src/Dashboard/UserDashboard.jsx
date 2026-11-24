@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Routes, Route, NavLink, Outlet, useNavigate } from "react-router-dom";
+import { Routes, Route, NavLink, useNavigate, Navigate } from "react-router-dom";
 import {
   Package,
   ShoppingCart,
@@ -29,13 +29,13 @@ const UserDashboard = () => {
   const user = {
     name: localStorage.getItem("userName") || "Customer",
     email: localStorage.getItem("userEmail") || "customer@example.com",
-    role: localStorage.getItem("userRole") || "USER",
+    role: localStorage.getItem("role") || "USER",
   };
 
   const handleLogout = () => {
-    localStorage.removeItem("userId");
     localStorage.removeItem("token");
-    localStorage.removeItem("userRole");
+    localStorage.removeItem("role");
+    localStorage.removeItem("userId");
     localStorage.removeItem("userName");
     localStorage.removeItem("userEmail");
     navigate("/login");
@@ -126,6 +126,7 @@ const UserDashboard = () => {
       <main className="flex-1 bg-[#12121b] text-white p-6">
         <h1 className="text-2xl font-bold mb-4">Welcome, {user.name}!</h1>
         <Routes>
+          <Route index element={<Navigate to="products" replace />} />
           <Route path="products" element={<UserProductList />} />
           <Route path="orders" element={<UserOrderList />} />
           <Route path="place-order" element={<PlaceOrder />} />

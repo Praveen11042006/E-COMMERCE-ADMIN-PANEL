@@ -1,36 +1,70 @@
 // UserList.js - Main user listing component
-import React, { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { getAllUsers, deleteUser } from "../utils/api.js";
+import React, { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { getUsersPaged, deleteUser } from "../utils/api.js";
+
+const PAGE_SIZE = 10;
 
 const UserList = () => {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [sortBy, setSortBy] = useState("name");
+  const [sortOrder, setSortOrder] = useState("asc");
   const [filterRole, setFilterRole] = useState("");
-  const navigate = useNavigate();
+  // Phase 10C: server-side pagination state.
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(0);
+  const [totalElements, setTotalElements] = useState(0);
 
+  // Debounce the search term — the filtering happens on the server.
   useEffect(() => {
-    fetchUsers();
-  }, []);
+    const timer = setTimeout(() => setDebouncedSearch(searchTerm), 350);
+    return () => clearTimeout(timer);
+  }, [searchTerm]);
 
-  const fetchUsers = async () => {
+  // Any filter/sort change invalidates the current page.
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedSearch, filterRole, sortBy, sortOrder]);
+
+  const fetchUsers = useCallback(async () => {
+    setLoading(true);
     try {
-      const res = await getAllUsers();
-      setUsers(res.data);
+      const params = {
+        page: currentPage - 1, // the API is 0-based, the UI is 1-based
+        size: PAGE_SIZE,
+        sort: `${sortBy},${sortOrder}`,
+      };
+      if (filterRole) params.role = filterRole;
+      if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
+
+      const res = await getUsersPaged(params);
+      const data = res.data || {};
+      setUsers(Array.isArray(data.content) ? data.content : []);
+      setTotalPages(data.totalPages ?? 0);
+      setTotalElements(data.totalElements ?? 0);
+      setError("");
     } catch (err) {
       console.error("Error fetching users:", err);
+      setError("Failed to load users. Please try again.");
     } finally {
       setLoading(false);
     }
-  };
+  }, [currentPage, sortBy, sortOrder, filterRole, debouncedSearch]);
+
+  useEffect(() => {
+    fetchUsers();
+  }, [fetchUsers]);
 
   const handleDeleteUser = async (userId, userName) => {
     if (window.confirm(`Are you sure you want to delete ${userName}?`)) {
       try {
         await deleteUser(userId);
         setUsers(users.filter(user => user.id !== userId));
+        setTotalElements(prev => Math.max(prev - 1, 0));
       } catch (err) {
         console.error("Error deleting user:", err);
         alert("Failed to delete user. Please try again.");
@@ -38,33 +72,8 @@ const UserList = () => {
     }
   };
 
-  const filteredAndSortedUsers = users
-    .filter(user => {
-      const matchesSearch = 
-        (user.name?.toLowerCase().includes(searchTerm.toLowerCase())) ||
-        (user.username?.toLowerCase().includes(searchTerm.toLowerCase())) ||
-        (user.email?.toLowerCase().includes(searchTerm.toLowerCase()));
-      
-      const matchesRole = !filterRole || user.role === filterRole;
-      
-      return matchesSearch && matchesRole;
-    })
-    .sort((a, b) => {
-      switch(sortBy) {
-        case "name":
-          return (a.name || a.username || "").localeCompare(b.name || b.username || "");
-        case "email":
-          return (a.email || "").localeCompare(b.email || "");
-        case "role":
-          return (a.role || "").localeCompare(b.role || "");
-        case "created":
-          return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
-        default:
-          return 0;
-      }
-    });
-
-  const uniqueRoles = [...new Set(users.map(user => user.role).filter(Boolean))];
+  // The roles offered in the filter - the two roles the backend knows.
+  const uniqueRoles = ["USER", "ADMIN"];
 
   if (loading) {
     return (
@@ -88,7 +97,7 @@ const UserList = () => {
               <div>
                 <h1 className="text-2xl font-semibold text-white">User Management</h1>
                 <p className="text-blue-100 mt-1">
-                  Manage and view all user accounts ({users.length} total)
+                  Manage and view all user accounts ({totalElements} total)
                 </p>
               </div>
               
@@ -117,16 +126,22 @@ const UserList = () => {
           <div className="bg-gray-50 px-6 py-4 border-b border-gray-200">
             <div className="flex items-center justify-between">
               <div className="flex gap-4">
-                {/* Sort Options */}
+                {/* Sort Options — the direction is part of the sort value so
+                    the server can apply it (Phase 10C). */}
                 <select
-                  value={sortBy}
-                  onChange={(e) => setSortBy(e.target.value)}
+                  value={`${sortBy}-${sortOrder}`}
+                  onChange={(e) => {
+                    const [field, order] = e.target.value.split("-");
+                    setSortBy(field);
+                    setSortOrder(order);
+                  }}
                   className="px-3 py-2 rounded-md border border-gray-300 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 >
-                  <option value="name">Sort by Date Created</option>
-                  <option value="email">Sort by Email</option>
-                  <option value="role">Sort by Role</option>
-                  <option value="created">Sort by Date Created</option>
+                  <option value="name-asc">Sort by Name (A-Z)</option>
+                  <option value="name-desc">Sort by Name (Z-A)</option>
+                  <option value="email-asc">Sort by Email</option>
+                  <option value="role-asc">Sort by Role</option>
+                  <option value="createdAt-desc">Sort by Date Created</option>
                 </select>
 
                 {/* Role Filter */}
@@ -135,7 +150,7 @@ const UserList = () => {
                   onChange={(e) => setFilterRole(e.target.value)}
                   className="px-3 py-2 rounded-md border border-gray-300 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 >
-                  <option value="">USER</option>
+                  <option value="">All Roles</option>
                   {uniqueRoles.map(role => (
                     <option key={role} value={role}>{role}</option>
                   ))}
@@ -143,14 +158,19 @@ const UserList = () => {
               </div>
 
               <div className="text-sm text-gray-600">
-                {filteredAndSortedUsers.length} of {users.length} users
+                Showing {users.length} of {totalElements} users
               </div>
             </div>
           </div>
 
           {/* User List */}
+          {error && (
+            <div className="mx-6 mt-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {error}
+            </div>
+          )}
           <div className="divide-y divide-gray-200">
-            {filteredAndSortedUsers.length === 0 ? (
+            {users.length === 0 ? (
               <div className="text-center py-12">
                 <div className="w-12 h-12 mx-auto mb-4 bg-gray-100 rounded-full flex items-center justify-center">
                   <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -163,7 +183,7 @@ const UserList = () => {
                 </p>
               </div>
             ) : (
-              filteredAndSortedUsers.map((user) => (
+              users.map((user) => (
                 <div key={user.id} className="px-6 py-4 hover:bg-gray-50 transition-colors">
                   <div className="flex items-center justify-between">
                     <Link
@@ -181,7 +201,7 @@ const UserList = () => {
                           <h3 className="font-medium text-gray-900 truncate group-hover:text-blue-600 transition-colors">
                             {user.name || user.username || "Unknown User"}
                           </h3>
-                          {user.status === "active" && (
+                          {user.active && (
                             <span className="w-2 h-2 bg-green-400 rounded-full"></span>
                           )}
                         </div>
@@ -235,6 +255,30 @@ const UserList = () => {
               ))
             )}
           </div>
+          {/* Phase 10C: server-side pagination controls */}
+          {totalPages > 1 && (
+            <div className="bg-gray-50 px-6 py-4 border-t border-gray-200 flex items-center justify-between">
+              <p className="text-sm text-gray-600">
+                Page {currentPage} of {totalPages}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setCurrentPage((p) => Math.max(p - 1, 1))}
+                  disabled={currentPage === 1 || loading}
+                  className="px-3 py-1.5 rounded-md border border-gray-300 text-sm text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Previous
+                </button>
+                <button
+                  onClick={() => setCurrentPage((p) => Math.min(p + 1, totalPages))}
+                  disabled={currentPage === totalPages || loading}
+                  className="px-3 py-1.5 rounded-md border border-gray-300 text-sm text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

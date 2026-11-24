@@ -1,15 +1,30 @@
-# Use a JDK image to build the app
+# --- Build stage -------------------------------------------------------------
 FROM maven:3.9.4-eclipse-temurin-17 AS build
 WORKDIR /app
 COPY . .
-RUN mvn clean package -DskipTests
+RUN mvn -B clean package -DskipTests
 
-# Use a lightweight JRE image to run the app
-FROM eclipse-temurin:17-jdk
+# --- Runtime stage -----------------------------------------------------------
+FROM eclipse-temurin:17-jre
 WORKDIR /app
-COPY --from=build /app/target/*.jar app.jar
 
-# Expose the port (Spring Boot default is 8080)
+# curl powers the container health check; a dedicated non-root user runs the app.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --create-home spring
+
+COPY --from=build /app/target/*.jar app.jar
+RUN chown spring:spring app.jar
+USER spring
+
+# Production containers use strict environment-only configuration. Supply the
+# mandatory values at runtime; never bake secrets into this image.
+ENV SPRING_PROFILES_ACTIVE=prod
+
 EXPOSE 8080
 
-ENTRYPOINT ["java", "-jar", "app.jar"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8080/actuator/health || exit 1
+
+ENTRYPOINT ["sh", "-c", "exec java ${JAVA_OPTS:-} -jar /app/app.jar"]

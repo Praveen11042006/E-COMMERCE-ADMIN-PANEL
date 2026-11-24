@@ -1,5 +1,15 @@
-import React, { useState, useEffect } from 'react';
-import { fetchProducts, createOrder, updateProduct } from '../utils/api';
+import React, { useCallback, useEffect, useState } from 'react';
+import { fetchProductsPaged, createOrder } from '../utils/api';
+
+const PAGE_SIZE = 12;
+const SORT_MAP = {
+  'name-asc': 'name,asc',
+  'name-desc': 'name,desc',
+  'price-asc': 'price,asc',
+  'price-desc': 'price,desc',
+  'stock-asc': 'stockQuantity,asc',
+  'stock-desc': 'stockQuantity,desc',
+};
 
 const CreateOrder = () => {
   const [order, setOrder] = useState({
@@ -9,8 +19,12 @@ const CreateOrder = () => {
     orderItems: []
   });
   
-  const [products, setProducts] = useState([]);
-  const [filteredProducts, setFilteredProducts] = useState([]);
+  // One page at a time; `catalog` remembers every product seen so cart lines added on
+  // a previous page still resolve their name, price and stock.
+  const [pageProducts, setPageProducts] = useState([]);
+  const [catalog, setCatalog] = useState({});
+  const [meta, setMeta] = useState({ page: 0, totalPages: 0, totalElements: 0, first: true, last: true });
+  const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [alert, setAlert] = useState({ show: false, message: '', type: '' });
@@ -18,67 +32,52 @@ const CreateOrder = () => {
   const [categoryFilter, setCategoryFilter] = useState('');
   const [sortBy, setSortBy] = useState('name-asc');
 
-  useEffect(() => {
-    loadProducts();
-  }, []);
-
-  useEffect(() => {
-    applyFiltersAndSorting();
-  }, [products, searchTerm, categoryFilter, sortBy]);
-
-  const loadProducts = async () => {
+  const loadProducts = useCallback(async () => {
     try {
       setLoading(true);
-      const response = await fetchProducts();
-      setProducts(response.data);
-      setFilteredProducts(response.data);
+      const response = await fetchProductsPaged({
+        page,
+        size: PAGE_SIZE,
+        sort: SORT_MAP[sortBy] || 'name,asc',
+        search: searchTerm.trim() || undefined,
+        category: categoryFilter.trim() || undefined,
+      });
+      const data = response.data || {};
+      const content = Array.isArray(data.content) ? data.content : [];
+      setPageProducts(content);
+      setCatalog((prev) => {
+        const next = { ...prev };
+        content.forEach((p) => { next[p.id] = p; });
+        return next;
+      });
+      setMeta({
+        page: data.page ?? page,
+        totalPages: data.totalPages ?? 0,
+        totalElements: data.totalElements ?? 0,
+        first: data.first ?? true,
+        last: data.last ?? true,
+      });
     } catch (error) {
       console.error('Error fetching products:', error);
       showMessage('❌ Failed to load products', 'error');
-      setProducts([]);
-      setFilteredProducts([]);
+      setPageProducts([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, [page, sortBy, searchTerm, categoryFilter]);
 
-  const applyFiltersAndSorting = () => {
-    let result = [...products];
+  // Debounce text filters; page and sort changes reload straight away.
+  useEffect(() => {
+    const timer = setTimeout(loadProducts, 300);
+    return () => clearTimeout(timer);
+  }, [loadProducts]);
 
-    // Apply search filter
-    if (searchTerm) {
-      result = result.filter(p => 
-        p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        p.description.toLowerCase().includes(searchTerm.toLowerCase())
-      );
-    }
+  // Any filter change restarts at the first page.
+  useEffect(() => {
+    setPage(0);
+  }, [searchTerm, categoryFilter, sortBy]);
 
-    // Apply category filter
-    if (categoryFilter) {
-      result = result.filter(p => 
-        p.category.toLowerCase().startsWith(categoryFilter.toLowerCase())
-      );
-    }
-
-    // Apply sorting
-    if (sortBy === 'name-asc') {
-      result.sort((a, b) => a.name.localeCompare(b.name));
-    } else if (sortBy === 'name-desc') {
-      result.sort((a, b) => b.name.localeCompare(a.name));
-    } else if (sortBy === 'price-asc') {
-      result.sort((a, b) => a.price - b.price);
-    } else if (sortBy === 'price-desc') {
-      result.sort((a, b) => b.price - a.price);
-    } else if (sortBy === 'stock-asc') {
-      result.sort((a, b) => a.stockQuantity - b.stockQuantity);
-    } else if (sortBy === 'stock-desc') {
-      result.sort((a, b) => b.stockQuantity - a.stockQuantity);
-    }
-
-    setFilteredProducts(result);
-  };
-
-  const showMessage = (text, type, shouldNavigate = false) => {
+  const showMessage = (text, type) => {
     setAlert({ show: true, message: text, type });
     setTimeout(() => {
       setAlert({ show: false, message: '', type: '' });
@@ -106,7 +105,7 @@ const CreateOrder = () => {
 
   const updateQuantity = (productId, qty) => {
     const quantity = parseInt(qty);
-    const product = products.find(p => p.id === productId);
+    const product = catalog[productId];
     
     if (quantity < 1) {
       showMessage('❌ Quantity must be at least 1', 'error');
@@ -127,7 +126,7 @@ const CreateOrder = () => {
   };
 
   const removeItem = (productId) => {
-    const product = products.find(p => p.id === productId);
+    const product = catalog[productId];
     setOrder({
       ...order,
       orderItems: order.orderItems.filter(item => item.productId !== productId)
@@ -137,7 +136,7 @@ const CreateOrder = () => {
 
   const getTotalAmount = () => {
     return order.orderItems.reduce((total, item) => {
-      const product = products.find(p => p.id === item.productId);
+      const product = catalog[item.productId];
       return total + (product?.price || 0) * item.quantity;
     }, 0);
   };
@@ -159,21 +158,6 @@ const CreateOrder = () => {
       minimumFractionDigits: 0,
       maximumFractionDigits: 0
     }).format(amount);
-  };
-
-  const updateProductStock = async (productId, quantityOrdered) => {
-    try {
-      const product = products.find(p => p.id === productId);
-      if (product) {
-        const updatedProduct = {
-          ...product,
-          stockQuantity: product.stockQuantity - quantityOrdered
-        };
-        await updateProduct(productId, updatedProduct);
-      }
-    } catch (error) {
-      console.error(`Error updating stock for product ${productId}:`, error);
-    }
   };
 
   const handleSubmit = async () => {
@@ -203,14 +187,7 @@ const CreateOrder = () => {
       // Create the order
       await createOrder(orderData);
       
-      // Update stock for each ordered product
-      const stockUpdatePromises = order.orderItems.map(item => 
-        updateProductStock(item.productId, item.quantity)
-      );
-      
-      await Promise.all(stockUpdatePromises);
-      
-      showMessage("✅ Order created successfully and stock updated!", 'success');
+      showMessage("✅ Order created successfully!", 'success');
       
       // Reset form after successful submission
       setTimeout(() => {
@@ -232,7 +209,7 @@ const CreateOrder = () => {
     }
   };
 
-  if (loading) {
+  if (loading && pageProducts.length === 0) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
@@ -381,8 +358,8 @@ const CreateOrder = () => {
 
           {/* Products Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-            {filteredProducts.length > 0 ? (
-              filteredProducts.map(product => (
+            {pageProducts.length > 0 ? (
+              pageProducts.map(product => (
                 <div key={product.id} className="border border-gray-200 rounded-lg p-6 bg-white transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5">
                   <div className="mb-4">
                     <h3 className="text-lg font-semibold text-gray-900 mb-2">{product.name}</h3>
@@ -434,9 +411,11 @@ const CreateOrder = () => {
                 <div className="text-6xl mb-4">📦</div>
                 <h3 className="text-lg font-medium text-gray-900 mb-2">No products found</h3>
                 <p className="text-gray-600 mb-4">
-                  {products.length === 0 ? 'No products available in the database' : 'Try adjusting your search or filters'}
+                  {meta.totalElements === 0 && !searchTerm && !categoryFilter
+                    ? 'No products available in the database'
+                    : 'Try adjusting your search or filters'}
                 </p>
-                {products.length === 0 && (
+                {meta.totalElements === 0 && !searchTerm && !categoryFilter && (
                   <button 
                     onClick={loadProducts}
                     className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors duration-200 focus:outline-none focus:ring-3 focus:ring-blue-100"
@@ -446,6 +425,31 @@ const CreateOrder = () => {
                 )}
               </div>
             )}
+          </div>
+
+          {/* Server-side pagination */}
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mt-6 pt-4 border-t border-gray-200">
+            <p className="text-sm text-gray-600">
+              Page {Math.min(meta.page + 1, Math.max(meta.totalPages, 1))} of {Math.max(meta.totalPages, 1)}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                disabled={meta.first || loading}
+                className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Previous
+              </button>
+              <button
+                type="button"
+                onClick={() => setPage((p) => p + 1)}
+                disabled={meta.last || loading}
+                className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
           </div>
         </div>
 
@@ -467,7 +471,7 @@ const CreateOrder = () => {
           ) : (
             <div className="flex flex-col gap-4">
               {order.orderItems.map(item => {
-                const product = products.find(p => p.id === item.productId);
+                const product = catalog[item.productId];
                 if (!product) return null;
                 
                 return (

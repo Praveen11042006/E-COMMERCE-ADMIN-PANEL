@@ -27,7 +27,9 @@ export default function Login() {
         setError("Unknown role. Contact support.");
       }
     } catch (err) {
-      setError("Invalid credentials. Try again.");
+      // Surface the backend message (e.g. inactive-account rejection) when available.
+      const message = err.response?.data?.message;
+      setError(message || "Invalid credentials. Try again.");
     }
   };
 

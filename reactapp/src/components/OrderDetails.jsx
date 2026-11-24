@@ -1,6 +1,13 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getOrder, updateOrderStatus, deleteOrder } from '../utils/api';
+import {
+  getOrder,
+  updateOrderStatus,
+  deleteOrder,
+  fetchPaymentsForOrder,
+  payOrder,
+  fetchInvoice,
+} from '../utils/api';
 import {
   Package,
   Truck,
@@ -11,7 +18,6 @@ import {
   Edit3,
   User,
   Mail,
-  Phone,
   MapPin,
   Calendar,
   DollarSign,
@@ -28,7 +34,6 @@ import {
   Minus,
   ShoppingCart,
   CreditCard,
-  Truck as TruckIcon,
   Archive,
   Bell,
   Settings
@@ -46,15 +51,13 @@ export default function OrderDetails({ orderId: propOrderId, onBack }) {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
-  const [isEditing, setIsEditing] = useState(false);
-  const [editForm, setEditForm] = useState({
-    customerName: '',
-    customerEmail: '',
-    customerPhone: '',
-    shippingAddress: '',
-    notes: '',
-    orderItems: []
-  });
+
+  // Phase 13B: payment + invoice data come from the real /api/payments endpoints.
+  const [payments, setPayments] = useState([]);
+  const [paymentLoading, setPaymentLoading] = useState(false);
+  const [paying, setPaying] = useState(false);
+  const [invoice, setInvoice] = useState(null);
+  const [invoiceLoading, setInvoiceLoading] = useState(false);
 
   // Helper: accept axios response or plain object
   const extractData = useCallback((resp) => {
@@ -92,14 +95,18 @@ export default function OrderDetails({ orderId: propOrderId, onBack }) {
 
       setOrder(normalizedOrder);
       setStatus(normalizedOrder.status || 'PENDING');
-      setEditForm({
-        customerName: normalizedOrder.customerName || '',
-        customerEmail: normalizedOrder.customerEmail || '',
-        customerPhone: normalizedOrder.customerPhone || '',
-        shippingAddress: normalizedOrder.shippingAddress || '',
-        notes: normalizedOrder.notes || '',
-        orderItems: normalizedOrder.orderItems || []
-      });
+
+      // Payment records are supplementary: a failure here must never hide the order.
+      try {
+        setPaymentLoading(true);
+        const paymentResp = await fetchPaymentsForOrder(orderId);
+        setPayments(Array.isArray(paymentResp.data) ? paymentResp.data : []);
+      } catch (paymentErr) {
+        console.error('loadPayments error', paymentErr);
+        setPayments([]);
+      } finally {
+        setPaymentLoading(false);
+      }
     } catch (err) {
       console.error('loadOrder error', err);
       setError('Failed to load order details. Please try again.');
@@ -172,6 +179,38 @@ export default function OrderDetails({ orderId: propOrderId, onBack }) {
     }
   };
 
+  // Mock payment: the backend derives the amount from the order and has no gateway.
+  const handlePay = async () => {
+    try {
+      setPaying(true);
+      setError('');
+      await payOrder(order.id);
+      const paymentResp = await fetchPaymentsForOrder(order.id);
+      setPayments(Array.isArray(paymentResp.data) ? paymentResp.data : []);
+      setSuccessMessage('Mock payment recorded for this order');
+    } catch (err) {
+      console.error('payOrder error', err);
+      setError(err.response?.data?.message || 'Payment could not be completed. Please try again.');
+    } finally {
+      setPaying(false);
+    }
+  };
+
+  // Invoice is generated server-side from the stored order and payment.
+  const handleInvoice = async () => {
+    try {
+      setInvoiceLoading(true);
+      setError('');
+      const resp = await fetchInvoice(order.id);
+      setInvoice(resp.data);
+    } catch (err) {
+      console.error('fetchInvoice error', err);
+      setError(err.response?.data?.message || 'Invoice could not be loaded. Please try again.');
+    } finally {
+      setInvoiceLoading(false);
+    }
+  };
+
   // Handle back navigation
   const handleBack = useCallback(() => {
     if (onBack) onBack();
@@ -195,19 +234,16 @@ export default function OrderDetails({ orderId: propOrderId, onBack }) {
     }
   };
 
-  // Calculate order totals
+  // Calculate order totals from stored line items. The backend does not model tax or
+  // shipping, so neither is displayed (totalAmount is the authoritative payable amount).
   const calculateTotals = useCallback((items) => {
     const subtotal = items.reduce((sum, item) => {
       const price = parseFloat(item.priceAtPurchase || item.price || 0);
       const quantity = parseInt(item.quantity || item.qty || 1);
       return sum + (price * quantity);
     }, 0);
-    
-    const tax = subtotal * 0.18; // Assuming 18% tax
-    const shipping = subtotal > 500 ? 0 : 50; // Free shipping over ₹500
-    const total = subtotal + tax + shipping;
 
-    return { subtotal, tax, shipping, total };
+    return { subtotal };
   }, []);
 
   // Print order
@@ -334,6 +370,13 @@ export default function OrderDetails({ orderId: propOrderId, onBack }) {
 
   const items = order.orderItems || [];
   const totals = calculateTotals(items);
+  const latestPayment = [...payments].sort((a, b) => (a.id || 0) - (b.id || 0)).slice(-1)[0] || null;
+  const hasSuccessfulPayment = payments.some((p) => p.status === 'SUCCESS');
+  const paymentStatusClass = (paymentStatus) => {
+    if (paymentStatus === 'SUCCESS') return 'bg-green-100 text-green-800';
+    if (paymentStatus === 'FAILED') return 'bg-red-100 text-red-800';
+    return 'bg-yellow-100 text-yellow-800';
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50">
@@ -444,12 +487,6 @@ export default function OrderDetails({ orderId: propOrderId, onBack }) {
                       <Mail className="w-4 h-4 text-gray-400" />
                       <span className="text-gray-700">{order.customerEmail || 'N/A'}</span>
                     </div>
-                    {order.customerPhone && (
-                      <div className="flex items-center gap-3">
-                        <Phone className="w-4 h-4 text-gray-400" />
-                        <span className="text-gray-700">{order.customerPhone}</span>
-                      </div>
-                    )}
                   </div>
                 </div>
 
@@ -463,58 +500,79 @@ export default function OrderDetails({ orderId: propOrderId, onBack }) {
                       <MapPin className="w-4 h-4 text-gray-400 mt-1" />
                       <span className="text-gray-700">{order.shippingAddress || 'N/A'}</span>
                     </div>
-                    {order.trackingNumber && (
-                      <div className="flex items-center gap-3">
-                        <TruckIcon className="w-4 h-4 text-gray-400" />
-                        <span className="text-gray-700 font-mono text-sm">{order.trackingNumber}</span>
-                      </div>
-                    )}
                   </div>
                 </div>
               </div>
 
-              {/* Payment Information */}
-              {(order.paymentStatus || order.paymentMethod) && (
-                <div className="pt-6 border-t border-gray-100">
-                  <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              {/* Payment — real records from /api/payments (mock gateway, no real charge) */}
+              <div className="pt-6 border-t border-gray-100">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                  <h3 className="font-semibold text-gray-900 flex items-center gap-2">
                     <CreditCard className="w-5 h-5 text-purple-600" />
-                    Payment Information
+                    Payment
                   </h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    {order.paymentStatus && (
-                      <div className="flex items-center gap-3">
-                        <span className="text-gray-600">Payment Status:</span>
-                        <span className={`px-3 py-1 rounded-full text-xs font-semibold uppercase ${
-                          order.paymentStatus === 'PAID' 
-                            ? 'bg-green-100 text-green-800' 
-                            : 'bg-yellow-100 text-yellow-800'
-                        }`}>
-                          {order.paymentStatus}
-                        </span>
-                      </div>
-                    )}
-                    {order.paymentMethod && (
-                      <div className="flex items-center gap-3">
-                        <span className="text-gray-600">Payment Method:</span>
-                        <span className="font-medium text-gray-900">{order.paymentMethod}</span>
-                      </div>
-                    )}
-                  </div>
+                  <span className="text-xs text-gray-500">Mock gateway — no real payment is processed</span>
                 </div>
-              )}
 
-              {/* Order Notes */}
-              {order.notes && (
-                <div className="pt-6 border-t border-gray-100">
-                  <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                    <FileText className="w-5 h-5 text-orange-600" />
-                    Order Notes
-                  </h3>
-                  <div className="bg-gray-50 rounded-lg p-4">
-                    <p className="text-gray-700">{order.notes}</p>
+                {paymentLoading ? (
+                  <p className="text-sm text-gray-500">Loading payment records...</p>
+                ) : payments.length === 0 ? (
+                  <p className="text-sm text-gray-600">No payment recorded for this order.</p>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="flex items-center gap-3">
+                      <span className="text-gray-600">Status:</span>
+                      <span className={`px-3 py-1 rounded-full text-xs font-semibold uppercase ${paymentStatusClass(latestPayment.status)}`}>
+                        {latestPayment.status}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-gray-600">Method:</span>
+                      <span className="font-medium text-gray-900">{latestPayment.method || 'MOCK'}</span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-gray-600">Amount:</span>
+                      <span className="font-medium text-gray-900">₹{Number(latestPayment.amount || 0).toFixed(2)}</span>
+                    </div>
+                    {latestPayment.invoiceNumber && (
+                      <div className="flex items-center gap-3">
+                        <span className="text-gray-600">Invoice:</span>
+                        <span className="font-mono text-sm text-gray-900">{latestPayment.invoiceNumber}</span>
+                      </div>
+                    )}
+                    {latestPayment.transactionRef && (
+                      <div className="flex items-center gap-3 md:col-span-2">
+                        <span className="text-gray-600">Reference:</span>
+                        <span className="font-mono text-sm text-gray-700">{latestPayment.transactionRef}</span>
+                      </div>
+                    )}
                   </div>
+                )}
+
+                <div className="flex flex-wrap gap-3 mt-4">
+                  {!hasSuccessfulPayment && order.status !== 'CANCELLED' && (
+                    <button
+                      onClick={handlePay}
+                      disabled={paying}
+                      className="inline-flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors disabled:opacity-50"
+                    >
+                      <CreditCard className="w-4 h-4" />
+                      {paying ? 'Recording...' : 'Pay now (mock)'}
+                    </button>
+                  )}
+                  <button
+                    onClick={handleInvoice}
+                    disabled={invoiceLoading}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors disabled:opacity-50"
+                  >
+                    <FileText className="w-4 h-4" />
+                    {invoiceLoading ? 'Loading...' : 'View invoice'}
+                  </button>
                 </div>
-              )}
+                {hasSuccessfulPayment && (
+                  <p className="mt-2 text-sm text-green-700">This order has a successful (mock) payment.</p>
+                )}
+              </div>
             </div>
 
             {/* Order Items */}
@@ -578,14 +636,16 @@ export default function OrderDetails({ orderId: propOrderId, onBack }) {
                         <span className="text-gray-600">Subtotal:</span>
                         <span className="font-medium">₹{totals.subtotal.toFixed(2)}</span>
                       </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-600">Tax (18%):</span>
-                        <span className="font-medium">₹{totals.tax.toFixed(2)}</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-600">Shipping:</span>
-                        <span className="font-medium">₹{totals.shipping.toFixed(2)}</span>
-                      </div>
+                      {Number(order.discountAmount) > 0 && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-gray-600">
+                            Discount{order.couponCode ? ` (${order.couponCode})` : ''}:
+                          </span>
+                          <span className="font-medium text-green-600">
+                            -₹{Number(order.discountAmount).toFixed(2)}
+                          </span>
+                        </div>
+                      )}
                       <div className="flex justify-between items-center pt-2 border-t border-gray-100">
                         <span className="text-lg font-semibold text-gray-900">Total:</span>
                         <span className="text-xl font-bold text-green-600">₹{order.totalAmount.toFixed(2)}</span>
@@ -845,19 +905,6 @@ export default function OrderDetails({ orderId: propOrderId, onBack }) {
                   Copy Order Info
                 </button>
 
-                {order.trackingNumber && (
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(order.trackingNumber);
-                      setSuccessMessage('Tracking number copied to clipboard');
-                    }}
-                    className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
-                  >
-                    <TruckIcon className="w-4 h-4" />
-                    Copy Tracking #
-                  </button>
-                )}
-
                 <button
                   onClick={() => {
                     const printContent = `
@@ -869,7 +916,6 @@ export default function OrderDetails({ orderId: propOrderId, onBack }) {
                       
                       Customer: ${order.customerName || 'N/A'}
                       Email: ${order.customerEmail || 'N/A'}
-                      Phone: ${order.customerPhone || 'N/A'}
                       
                       Shipping Address:
                       ${order.shippingAddress || 'N/A'}
@@ -907,6 +953,75 @@ export default function OrderDetails({ orderId: propOrderId, onBack }) {
             </div>
           </div>
         </div>
+
+        {/* Invoice modal — server-generated invoice for this order */}
+        {invoice && (
+          <div
+            className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="invoice-title"
+          >
+            <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full p-6 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-start justify-between mb-4">
+                <div>
+                  <h2 id="invoice-title" className="text-xl font-bold text-gray-900">Invoice</h2>
+                  <p className="font-mono text-sm text-gray-600">{invoice.invoiceNumber}</p>
+                </div>
+                <button
+                  onClick={() => setInvoice(null)}
+                  aria-label="Close invoice"
+                  className="p-2 hover:bg-gray-100 rounded-lg"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="text-sm text-gray-700 space-y-1 mb-4">
+                <p><span className="text-gray-500">Order:</span> #{invoice.orderId}</p>
+                <p><span className="text-gray-500">Customer:</span> {invoice.customer}</p>
+                <p><span className="text-gray-500">Email:</span> {invoice.customerEmail}</p>
+                <p><span className="text-gray-500">Status:</span> {invoice.status}</p>
+              </div>
+
+              <table className="w-full text-sm mb-4">
+                <thead>
+                  <tr className="border-b border-gray-200">
+                    <th className="text-left py-2">Product</th>
+                    <th className="text-center py-2">Qty</th>
+                    <th className="text-right py-2">Line total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(invoice.items || []).map((line, index) => (
+                    <tr key={`${line.product}-${index}`} className="border-b border-gray-100">
+                      <td className="py-2">{line.product}</td>
+                      <td className="py-2 text-center">{line.quantity}</td>
+                      <td className="py-2 text-right">₹{Number(line.lineTotal).toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              <div className="space-y-1 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-gray-600">Subtotal</span>
+                  <span>₹{Number(invoice.subtotal).toFixed(2)}</span>
+                </div>
+                {Number(invoice.discount) > 0 && (
+                  <div className="flex justify-between text-green-700">
+                    <span>Discount{invoice.couponCode ? ` (${invoice.couponCode})` : ''}</span>
+                    <span>-₹{Number(invoice.discount).toFixed(2)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between font-semibold text-gray-900 pt-2 border-t border-gray-200">
+                  <span>Total ({invoice.currency})</span>
+                  <span>₹{Number(invoice.total).toFixed(2)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Back to Orders Button */}
         <div className="mt-8 flex justify-center">

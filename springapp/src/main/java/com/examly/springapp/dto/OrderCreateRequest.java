@@ -28,4 +28,7 @@ public class OrderCreateRequest {
 
     // Add totalAmount if it's coming from client (optional)
     private double totalAmount;
+
+    /** Optional coupon code; validated & applied server-side. */
+    private String couponCode;
 }

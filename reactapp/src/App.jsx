@@ -1,34 +1,35 @@
-import React from "react";
+import React, { Suspense, lazy } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import Login from "./auth/Login.jsx";
 import Register from "./auth/Register.jsx";
-import UserDashboard from "./Dashboard/UserDashboard.jsx";
-import AdminDashboard from "./Dashboard/AdminDashboard.jsx";
-import ProductList from "./components/ProductList.jsx";
-import ProductForm from "./components/ProductForm.jsx";
-import OrderList from "./components/OrderList.jsx";
-import CreateOrder from "./components/CreateOrder.jsx";
-import OrderDetails from "./components/OrderDetails.jsx";
-import Analytics from "./components/Analytics.jsx";
 import PrivateRoute from "./components/PrivateRoute.jsx";
-import Profile from "./components/Profile.jsx";
 
-// User Components
-import PlaceOrder from "./UserComponents/PlaceOrder.jsx";
-import UserOrderItem from "./UserComponents/UserOrderItem.jsx";
-import UserOrderList from "./UserComponents/UserOrderList.jsx";
-import UserProductList from "./UserComponents/UserProductList.jsx";
-import UserDetails from "./components/UserDetails.jsx";
-import UserList from "./components/UserList.jsx";
+// Dashboards are code-split (React.lazy) so the initial bundle served to the
+// login/register pages no longer pulls in Recharts, every admin/user page, and
+// all ML/analytics components. Each dashboard chunk is fetched on first
+// navigation; PrivateRoute still guards access before the chunk is shown.
+const UserDashboard = lazy(() => import("./Dashboard/UserDashboard.jsx"));
+const AdminDashboard = lazy(() => import("./Dashboard/AdminDashboard.jsx"));
+
+const RouteFallback = () => (
+  <div className="flex items-center justify-center min-h-screen bg-gray-100">
+    <div
+      className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"
+      role="status"
+      aria-label="Loading"
+    />
+  </div>
+);
 
 const App = () => {
   return (
-    <Routes>
+    <Suspense fallback={<RouteFallback />}>
+      <Routes>
       {/* Auth */}
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
 
-      {/* User Dashboard */}
+      {/* Dashboards own their nested routes via internal <Routes>. */}
       <Route
         path="/user/*"
         element={
@@ -36,15 +37,7 @@ const App = () => {
             <UserDashboard />
           </PrivateRoute>
         }
-      >
-        <Route path="products" element={<UserProductList />} />
-        <Route path="orders" element={<UserOrderList />} />
-        <Route path="orders/:id" element={<UserOrderItem />} />
-        <Route path="place-order" element={<PlaceOrder />} />
-        <Route path="profile" element={<Profile />} />
-      </Route>
-
-      {/* Admin Dashboard */}
+      />
       <Route
         path="/admin/*"
         element={
@@ -52,23 +45,14 @@ const App = () => {
             <AdminDashboard />
           </PrivateRoute>
         }
-      >
-        <Route path="products" element={<ProductList />} />
-        <Route path="products/new" element={<ProductForm />} />
-        <Route path="products/:id/edit" element={<ProductForm />} />
-        <Route path="orders" element={<OrderList />} />
-        <Route path="orders/:id" element={<OrderDetails />} />
-        <Route path="create-order" element={<CreateOrder />} />
-        <Route path="analytics" element={<Analytics />} />
-        <Route path="profile" element={<Profile />} />
-        <Route path="users/:id" element={<UserDetails />} />
-        <Route path="users" element={<UserList />} />
-      </Route>
+      />
 
       {/* Fallback */}
       <Route path="*" element={<Navigate to="/login" />} />
-    </Routes>
+      </Routes>
+    </Suspense>
   );
 };
 
 export default App;
+

@@ -7,6 +7,7 @@ const UserDetails = () => {
   const navigate = useNavigate();
 
   const [formData, setFormData] = useState({});
+  const [newPassword, setNewPassword] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -35,7 +36,14 @@ const UserDetails = () => {
   const handleUpdate = async () => {
     setSaving(true);
     try {
-      await updateUser(id, formData);
+      // Keep the API contract explicit: immutable/audit fields and role are
+      // display-only and never sent back as a mass-assignment payload.
+      await updateUser(id, {
+        name: formData.name,
+        email: formData.email,
+        active: formData.active,
+        ...(newPassword ? { password: newPassword } : {}),
+      });
       navigate("/admin/users");
     } catch (err) {
       console.error("Error updating user:", err);
@@ -95,7 +103,7 @@ const UserDetails = () => {
           {/* Form */}
           <div className="p-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {Object.keys(formData).map((field) => {
+              {["name", "email", "active"].filter((field) => field in formData).map((field) => {
                 if (field.toLowerCase().includes("password")) return null;
                 
                 return (
@@ -104,11 +112,13 @@ const UserDetails = () => {
                       {field.charAt(0).toUpperCase() + field.slice(1).replace(/([A-Z])/g, ' $1')}
                     </label>
                     <input
-                      type="text"
+                      type={field === "active" ? "checkbox" : "text"}
                       name={field}
-                      value={formData[field] || ""}
-                      onChange={handleChange}
-                      disabled={field === "id"}
+                      value={field === "active" ? undefined : (formData[field] || "")}
+                      checked={field === "active" ? Boolean(formData[field]) : undefined}
+                      onChange={(e) => field === "active"
+                        ? setFormData(prev => ({ ...prev, active: e.target.checked }))
+                        : handleChange(e)}
                       className={`w-full px-3 py-2 border rounded-md shadow-sm transition-colors ${
                         field === "id" 
                           ? "bg-gray-50 border-gray-200 text-gray-500 cursor-not-allowed" 
@@ -118,6 +128,11 @@ const UserDetails = () => {
                   </div>
                 );
               })}
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-gray-700">New password (optional)</label>
+                <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-md shadow-sm bg-white border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20" />
+              </div>
             </div>
           </div>
 

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Routes, Route, NavLink, useNavigate } from "react-router-dom";
+import { Routes, Route, NavLink, useNavigate, Navigate } from "react-router-dom";
 import {
   Package,
   Plus,
@@ -11,6 +11,8 @@ import {
   LogOut,
   ChevronUp,
   Users,
+  Brain,
+  Ticket,
 } from "lucide-react";
 
 // Import your actual components
@@ -20,9 +22,11 @@ import OrderList from "../components/OrderList.jsx";
 import CreateOrder from "../components/CreateOrder.jsx";
 import OrderDetails from "../components/OrderDetails.jsx";
 import Analytics from "../components/Analytics.jsx";
+import Insights from "../components/Insights.jsx";
 import Profile from "../components/Profile.jsx";
 import UserList from "../components/UserList.jsx";
 import UserDetails from "../components/UserDetails.jsx";
+import CouponList from "../components/CouponList.jsx";
 
 const AdminDashboard = () => {
   const [showProfileMenu, setShowProfileMenu] = useState(false);
@@ -34,22 +38,24 @@ const AdminDashboard = () => {
     { to: "/admin/orders", icon: ShoppingCart, label: "Orders" },
     { to: "/admin/orders/new", icon: FileText, label: "Create Order" },
     { to: "/admin/users", icon: Users, label: "Users" },
+    { to: "/admin/coupons", icon: Ticket, label: "Coupons" },
     { to: "/admin/analytics", icon: BarChart3, label: "Analytics" },
+    { to: "/admin/insights", icon: Brain, label: "Insights" },
   ];
 
   const user = {
     name: localStorage.getItem("userName") || "Admin User",
     email: localStorage.getItem("userEmail") || "admin@example.com",
-    role: localStorage.getItem("userRole") || "ADMIN",
+    role: localStorage.getItem("role") || "ADMIN",
   };
 
   const handleLogout = () => {
-    localStorage.removeItem("userId");
     localStorage.removeItem("token");
-    localStorage.removeItem("userRole");
+    localStorage.removeItem("role");
+    localStorage.removeItem("userId");
     localStorage.removeItem("userName");
     localStorage.removeItem("userEmail");
-    navigate("/");
+    navigate("/login");
   };
 
   return (
@@ -134,6 +140,7 @@ const AdminDashboard = () => {
       {/* Main Content */}
       <main className="flex-1 p-6">
         <Routes>
+          <Route index element={<Navigate to="products" replace />} />
           {/* Products */}
           <Route path="products" element={<ProductList />} />
           <Route path="products/new" element={<ProductForm />} />
@@ -151,8 +158,14 @@ const AdminDashboard = () => {
             <Route path=":id" element={<UserDetails />} />
           </Route>
 
+          {/* Coupons (Phase 13B) */}
+          <Route path="coupons" element={<CouponList />} />
+
           {/* Analytics */}
           <Route path="analytics" element={<Analytics />} />
+
+          {/* ML / Business Insights */}
+          <Route path="insights" element={<Insights />} />
 
           {/* Profile */}
           <Route path="profile" element={<Profile />} />

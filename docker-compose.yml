@@ -1,0 +1,63 @@
+# Local full-stack demo stack. This file is NOT a production deployment:
+# - the backend runs the `docker` profile (Hibernate may create the schema on a
+#   fresh volume) instead of `prod`, which validates the schema and refuses to start
+#   without strict HTTPS configuration;
+# - MySQL is reachable only on the private compose network and never published.
+# Secrets are read from the environment (or a git-ignored .env) and are required:
+# compose refuses to start when they are missing.
+name: ecom-almostdone
+
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-ecom_docker}
+      MYSQL_USER: ${DB_USERNAME:-ecom_app}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD (see .env.example)}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD (see .env.example)}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  backend:
+    build:
+      context: ./springapp
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      DB_URL: jdbc:mysql://db:3306/${DB_NAME:-ecom_docker}?useSSL=false&allowPublicKeyRetrieval=true&autoReconnect=true
+      DB_USERNAME: ${DB_USERNAME:-ecom_app}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD (see .env.example)}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (32+ characters, see .env.example)}
+      JWT_EXPIRATION_MS: ${JWT_EXPIRATION_MS:-3600000}
+      APP_CORS_ORIGINS: ${APP_CORS_ORIGINS:-http://localhost:3000}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./reactapp
+      args:
+        # Empty value => same-origin requests through the nginx proxy.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      backend:
+        # Waits for the backend image health check (/actuator/health).
+        condition: service_healthy
+
+volumes:
+  # Named volume keeps MySQL data across `docker compose down` / `up`.
+  mysql_data:

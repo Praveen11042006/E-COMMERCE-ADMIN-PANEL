@@ -2,6 +2,7 @@ package com.examly.springapp.controller;
 
 import com.examly.springapp.model.*;
 import com.examly.springapp.repository.*;
+import com.examly.springapp.utils.JwtUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,9 +30,12 @@ public class OrderControllerTest {
     private OrderRepository orderRepository;
     @Autowired
     private ObjectMapper objectMapper;
+    @Autowired
+    private JwtUtil jwtUtil;
 
     private Product product1;
     private Product product2;
+    private String adminToken;
 
     @BeforeEach
     void setUp() {
@@ -40,24 +44,23 @@ public class OrderControllerTest {
         product1 = Product.builder().name("Phone").description("Phone").price(100.0).category("Electronics").stockQuantity(10).build();
         product2 = Product.builder().name("TV").description("TV").price(300.0).category("Electronics").stockQuantity(5).build();
         productRepository.saveAll(List.of(product1, product2));
+        // Generate admin JWT for protected endpoints
+        adminToken = "Bearer " + jwtUtil.generateToken("admin@test.com", "ADMIN", 1L);
     }
 
     @Test
     void controller_orderControllerCreateTest() throws Exception {
-        var orderPayload = new HashMap<>();
-        orderPayload.put("customerName", "John Doe");
-        orderPayload.put("customerEmail", "john@example.com");
-        orderPayload.put("shippingAddress", "123 Main St");
         List<Map<String, Object>> orderItems = List.of(
                 Map.of("productId", product1.getId(), "quantity", 2),
                 Map.of("productId", product2.getId(), "quantity", 1)
         );
-        orderPayload.put("orderItems", orderItems);
         List<Map<String, Object>> invalidOrderItems = List.of(
                 Map.of("productId", 999999, "quantity", 2)
         );
-        // Success
+
+        // Success — createOrder is authenticated (any logged-in user)
         mockMvc.perform(post("/api/orders")
+                .header("Authorization", adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(
                     Map.of(
@@ -65,8 +68,7 @@ public class OrderControllerTest {
                         "customerEmail", "john@example.com",
                         "shippingAddress", "123 Main St",
                         "orderItems", orderItems
-                    )))
-        )
+                    ))))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.customerName").value("John Doe"))
                 .andExpect(jsonPath("$.orderItems", hasSize(2)))
@@ -74,6 +76,7 @@ public class OrderControllerTest {
 
         // Product missing
         mockMvc.perform(post("/api/orders")
+                .header("Authorization", adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(
                     Map.of(
@@ -81,8 +84,7 @@ public class OrderControllerTest {
                         "customerEmail", "jane@example.com",
                         "shippingAddress", "1 King St",
                         "orderItems", invalidOrderItems
-                    )
-                )))
+                    ))))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").value("Product not found"));
 
@@ -91,6 +93,7 @@ public class OrderControllerTest {
                 Map.of("productId", product2.getId(), "quantity", 100)
         );
         mockMvc.perform(post("/api/orders")
+                .header("Authorization", adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(
                     Map.of(
@@ -98,12 +101,11 @@ public class OrderControllerTest {
                         "customerEmail", "bob@example.com",
                         "shippingAddress", "101 Ocean",
                         "orderItems", overstockItems
-                    )
-                )))
+                    ))))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.message").value("Insufficient stock"));
+                .andExpect(jsonPath("$.message").value("Insufficient stock for product: TV"));
 
-        // Check stock update
+        // Check stock update: ordered 2 of product1 (stock was 10), should be 8
         Optional<Product> p = productRepository.findById(product1.getId());
         assert(p.isPresent());
         assert(p.get().getStockQuantity() == 8);
@@ -112,33 +114,39 @@ public class OrderControllerTest {
     @Test
     void controller_orderControllerUpdateStatusTest() throws Exception {
         // Create order
-        var orderPayload =  Map.of(
+        var orderPayload = Map.of(
             "customerName", "Harry",
             "customerEmail", "harry@example.com",
             "shippingAddress", "11 Lane",
             "orderItems", List.of(Map.of("productId", product1.getId(), "quantity", 1))
         );
         String response = mockMvc.perform(post("/api/orders")
+                .header("Authorization", adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(orderPayload)))
                 .andReturn().getResponse().getContentAsString();
         Order createdOrder = objectMapper.readValue(response, Order.class);
         Long id = createdOrder.getId();
 
-        // Change status to SHIPPED
+        // Change status to SHIPPED (admin only)
         mockMvc.perform(patch("/api/orders/" + id + "/status")
+                .header("Authorization", adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(Map.of("status", "SHIPPED"))))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.status").value("SHIPPED"));
+
         // Invalid status
         mockMvc.perform(patch("/api/orders/" + id + "/status")
+                .header("Authorization", adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(Map.of("status", "NOT-A-STATUS"))))
             .andExpect(status().isBadRequest())
-            .andExpect(jsonPath("$.message").value("Invalid status"));
+            .andExpect(jsonPath("$.message", containsString("Invalid status")));
+
         // Not found
         mockMvc.perform(patch("/api/orders/99999/status")
+                .header("Authorization", adminToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(Map.of("status", "SHIPPED"))))
             .andExpect(status().isNotFound())
